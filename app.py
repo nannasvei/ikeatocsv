@@ -193,32 +193,30 @@ st.title("IKEA → CSV")
 if "csv_line" not in st.session_state:
     st.session_state.csv_line = ""
 
-# FIX: label nie może być pusty (a UI zostaje takie samo dzięki collapsed)
+# label nie może być pusty (a UI zostaje takie samo dzięki collapsed)
 user_input = st.text_input("tag_id_input", label_visibility="collapsed")
 
-col_a, col_b = st.columns([1, 1], vertical_alignment="center")
+# Zrób CSV pod pierwszym polem
+if st.button("Zrób CSV", type="primary"):
+    try:
+        tag_id = extract_tag_id(user_input)
+        if not tag_id:
+            raise ValueError("bad_input")
 
-with col_a:
-    if st.button("Zrób CSV", type="primary"):
-        try:
-            tag_id = extract_tag_id(user_input)
-            if not tag_id:
-                raise ValueError("bad_input")
+        data = fetch_offer(tag_id)
+        row = build_row(data)
+        st.session_state.csv_line = row_to_csv_line(row)
+    except Exception:
+        st.session_state.csv_line = ""
+        st.toast("Błąd", icon="⚠️")
 
-            data = fetch_offer(tag_id)
-            row = build_row(data)
-            st.session_state.csv_line = row_to_csv_line(row)
-        except Exception:
-            st.session_state.csv_line = ""
-            st.toast("Błąd", icon="⚠️")
-
-with col_b:
-    if st.button("Kopiuj", disabled=(st.session_state.csv_line == "")):
-        try:
-            pyperclip.copy(st.session_state.csv_line)
-            st.toast("Skopiowano!", icon="✅")
-        except Exception:
-            st.toast("Nie udało się skopiować", icon="❌")
-
-# FIX: label nie może być pusty (a UI zostaje takie samo dzięki collapsed)
+# drugie pole
 st.text_area("csv_output", value=st.session_state.csv_line, height=90, label_visibility="collapsed")
+
+# Kopiuj pod drugim polem
+if st.button("Kopiuj", disabled=(st.session_state.csv_line == "")):
+    try:
+        pyperclip.copy(st.session_state.csv_line)
+        st.toast("Skopiowano!", icon="✅")
+    except Exception:
+        st.toast("Nie udało się skopiować", icon="❌")
