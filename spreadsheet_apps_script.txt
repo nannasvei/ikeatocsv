@@ -1,0 +1,240 @@
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('CSV')
+    .addItem('Rozbij CSV z aktywnej komorki (Bx -> kolumny)', 'splitActiveCellCsvToColumns')
+    .addToUi();
+
+  SpreadsheetApp.getUi()
+    .createMenu('IKEA')
+    .addItem('Pobierz oferte z linku w L', 'fetchIkeaOfferFromActiveL')
+    .addToUi();
+}
+
+/* =========================
+   CSV -> kolumny + IMAGE + ceny + % + format wiersza
+   ========================= */
+
+function splitActiveCellCsvToColumns() {
+  const TEMPLATE_ROW = 6;
+
+  const range = SpreadsheetApp.getActiveRange();
+  if (!range || range.getNumRows() !== 1 || range.getNumColumns() !== 1) return;
+
+  let raw = String(range.getDisplayValue() || "").trim();
+  if (!looksLikeYourCsv(raw)) return;
+
+  const sheet = range.getSheet();
+  const row = range.getRow();
+  const col = range.getColumn();
+
+  if (raw.startsWith("'")) raw = raw.slice(1);
+
+  const parsed = Utilities.parseCsv(raw, ",");
+  if (!parsed || !parsed[0] || parsed[0].length < 8) return;
+
+  const fields = parsed[0].map(v => (v == null ? "" : String(v)));
+
+  /* === KLUCZOWA LOGIKA LICZB === */
+
+  // ceny: CSV index 5,6 -> "19.99" -> "19,99"
+  [5, 6].forEach(i => {
+    if (fields[i]) fields[i] = fields[i].replace(/(\d)\.(\d)/g, '$1,$2');
+  });
+
+  // procent: CSV index 7 -> zaokraglenie + "%"
+  if (fields[7]) {
+    const num = parseFloat(fields[7].replace(",", "."));
+    if (!isNaN(num)) {
+      fields[7] = Math.round(num) + "%";
+    }
+  }
+
+  /* === IMAGE === */
+  const first = fields[0].replace(/""/g, '"').trim();
+
+  const target = sheet.getRange(row, col, 1, fields.length);
+
+  // format jak wiersz 6
+  sheet
+    .getRange(TEMPLATE_ROW, col, 1, fields.length)
+    .copyTo(target, { formatOnly: true });
+
+  sheet.setRowHeight(row, sheet.getRowHeight(TEMPLATE_ROW));
+  target.clearContent();
+
+  if (first.startsWith("=")) {
+    target.getCell(1, 1).setFormula(first);
+  } else {
+    target.getCell(1, 1).setValue(first);
+  }
+
+  if (fields.length > 1) {
+    sheet.getRange(row, col + 1, 1, fields.length - 1)
+      .setValues([fields.slice(1)]);
+  }
+
+  SpreadsheetApp.flush();
+}
+
+function looksLikeYourCsv(raw) {
+  return raw.includes(",") &&
+    (raw.startsWith('"=IMAGE(') || raw.startsWith('=IMAGE('));
+}
+
+/* =========================
+   Link z L -> dane oferty od B
+   ========================= */
+
+const IKEA_API_PREFIX = "https://web-api.ikea.com/circular/circular-asis/api/public/offers/pl/pl/";
+
+const IKEA_UNIT_ID_TO_STORE = {
+  "188": ["warszawa-janki", "warszawa+janki"],
+  "203": ["gdansk", "gdańsk"],
+  "204": ["krakow", "kraków"],
+  "205": ["poznan", "poznań"],
+  "294": ["wroclaw", "wrocław"],
+  "306": ["katowice", "katowice"],
+  "307": ["warszawa-targowek", "warszawa+targówek"],
+  "311": ["lublin", "lublin"],
+  "329": ["lodz", "łódź"],
+  "429": ["bydgoszcz", "bydgoszcz"],
+  "583": ["szczecin", "szczecin"]
+};
+
+function fetchIkeaOfferFromActiveL() {
+  const TEMPLATE_ROW = 6;
+  const SOURCE_COL = 12;
+  const TARGET_COL = 2;
+
+  const ui = SpreadsheetApp.getUi();
+  const range = SpreadsheetApp.getActiveRange();
+  if (!range || range.getNumRows() !== 1 || range.getNumColumns() !== 1) return;
+  if (range.getColumn() !== SOURCE_COL) {
+    ui.alert("Zaznacz komórkę z linkiem w kolumnie L.");
+    return;
+  }
+
+  const raw = String(range.getDisplayValue() || range.getValue() || "").trim();
+  const tagId = ikeaExtractTagId(raw);
+  if (!tagId) {
+    ui.alert("Nie znalazłam numeru oferty w zaznaczonej komórce.");
+    return;
+  }
+
+  const data = ikeaFetchOffer(tagId);
+  const fields = ikeaBuildFields(data);
+  const sheet = range.getSheet();
+  const row = range.getRow();
+  const target = sheet.getRange(row, TARGET_COL, 1, fields.length);
+
+  sheet
+    .getRange(TEMPLATE_ROW, TARGET_COL, 1, fields.length)
+    .copyTo(target, { formatOnly: true });
+
+  sheet.setRowHeight(row, sheet.getRowHeight(TEMPLATE_ROW));
+  target.clearContent();
+
+  if (fields[0]) {
+    target.getCell(1, 1).setFormula(fields[0]);
+  }
+
+  if (fields.length > 1) {
+    sheet.getRange(row, TARGET_COL + 1, 1, fields.length - 1)
+      .setValues([fields.slice(1)]);
+  }
+
+  SpreadsheetApp.flush();
+}
+
+function ikeaFetchOffer(tagId) {
+  const response = UrlFetchApp.fetch(IKEA_API_PREFIX + tagId, {
+    method: "get",
+    muteHttpExceptions: true
+  });
+
+  const status = response.getResponseCode();
+  if (status < 200 || status >= 300) {
+    throw new Error("IKEA API zwróciło status " + status);
+  }
+
+  return JSON.parse(response.getContentText());
+}
+
+function ikeaBuildFields(data) {
+  const imageUrl = ikeaSafeGet(data, "media_list[0].url", "");
+  const title = ikeaSafeGet(data, "articles[0].title", "");
+  const desc = ikeaSafeGet(data, "articles[0].description", "");
+  const articleId = ikeaSafeGet(data, "articles[0].article_id", "");
+  const catalogPrice = ikeaSafeGet(data, "articles[0].price", "");
+  const promoPrice = ikeaSafeGet(data, "price", "");
+  const discountPct = ikeaCalcDiscountPercent(catalogPrice, promoPrice);
+  const reasonDiscount = ikeaSafeGet(data, "reasonDiscount", "");
+  const state = ikeaSafeGet(data, "state", "");
+  const tagId = ikeaSafeGet(data, "tagId", "");
+  const unitId = String(ikeaSafeGet(data, "unitId", ""));
+  const store = IKEA_UNIT_ID_TO_STORE[unitId] || ["", ""];
+  const productLink = articleId ? "https://www.ikea.com/pl/pl/search/?q=" + articleId : "";
+  const offerLink = store[0] && tagId
+    ? "https://www.ikea.com/pl/pl/second-hand/buy-from-ikea/#/" + store[0] + "/" + tagId
+    : "";
+
+  return [
+    imageUrl ? '=IMAGE("' + imageUrl + '")' : "",
+    String(title),
+    String(desc),
+    String(articleId),
+    productLink,
+    ikeaFormatPrice(catalogPrice),
+    ikeaFormatPrice(promoPrice),
+    discountPct === "" ? "" : Math.round(discountPct) + "%",
+    String(reasonDiscount),
+    String(state),
+    offerLink,
+    store[1]
+  ];
+}
+
+function ikeaSafeGet(obj, path, fallback) {
+  let cur = obj;
+  const parts = path.split(".");
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const match = part.match(/^(.+)\[(\d+)\]$/);
+
+    if (match) {
+      const key = match[1];
+      const index = Number(match[2]);
+      if (!cur || typeof cur !== "object" || !Array.isArray(cur[key]) || cur[key].length <= index) {
+        return fallback;
+      }
+      cur = cur[key][index];
+    } else {
+      if (!cur || typeof cur !== "object" || !(part in cur)) {
+        return fallback;
+      }
+      cur = cur[part];
+    }
+  }
+
+  return cur == null ? fallback : cur;
+}
+
+function ikeaExtractTagId(value) {
+  const match = String(value || "").trim().replace(/\/$/, "").match(/(\d+)$/);
+  return match ? match[1] : "";
+}
+
+function ikeaFormatPrice(value) {
+  if (value === "" || value == null) return "";
+  const num = Number(String(value).replace(",", "."));
+  if (isNaN(num)) return "";
+  return num.toFixed(2).replace(/\.?0+$/, "").replace(".", ",");
+}
+
+function ikeaCalcDiscountPercent(catalogPrice, promoPrice) {
+  const catalog = Number(String(catalogPrice).replace(",", "."));
+  const promo = Number(String(promoPrice).replace(",", "."));
+  if (isNaN(catalog) || isNaN(promo) || catalog <= 0) return "";
+  return ((catalog - promo) / catalog) * 100;
+}
